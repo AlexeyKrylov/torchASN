@@ -1,7 +1,6 @@
 # coding=utf-8
-from collections import OrderedDict
-
 import torch
+from transformers import AutoTokenizer
 import numpy as np
 try:
     import cPickle as pickle
@@ -42,7 +41,9 @@ class Dataset:
             batch_ids = index_arr[batch_size *
                                   batch_id: batch_size * (batch_id + 1)]
             batch_examples = [self.examples[i] for i in batch_ids]
-            batch_examples.sort(key=lambda e: -len(e.src_toks))
+
+            if shuffle:
+                batch_examples.sort(key=lambda e: -len(e.src_toks.split()))
 
             yield batch_examples
 
@@ -81,22 +82,21 @@ class Batch(object):
         return len(self.examples)
 
     def build_input(self):
+        tokenizer = AutoTokenizer.from_pretrained("cointegrated/rubert-tiny")
+        max_sent_len = max([len(x.src_toks.split()) for x in self.examples])
+        self.sents = tokenizer([x.src_toks for x in self.examples], padding=True, truncation=True, max_length=max_sent_len, return_tensors='pt')
+        # print(self.sents)
+        self.sent_lens = torch.LongTensor([ex.tolist().index(3)+1 for ex in self.sents['input_ids']])
+        max_sent_len = max(self.sent_lens)
+        self.sent_masks = sent_lens_to_mask(self.sent_lens, max_sent_len)
+        # print(self.sent_lens)
+        self.sent_masks = torch.ByteTensor(self.sent_masks)
 
-        sent_lens = [len(x.src_toks) for x in self.examples]
-        # print([x.src_toks for x in self.examples])
-        # print(len(self.vocab.src_vocab.word_to_id))
-        max_sent_len = max(sent_lens)
-        sent_masks = sent_lens_to_mask(sent_lens, max_sent_len)
-        sents = [
-            [
-                self.vocab.src_vocab[e.src_toks[i]] if i < l else self.vocab.src_vocab['<pad>']
-                for i in range(max_sent_len)
-            ]
-            for l, e in zip(sent_lens, self.examples)
-        ]
-        self.sents = torch.LongTensor(sents)
-        self.sent_lens = torch.LongTensor(sent_lens)
-        self.sent_masks = torch.ByteTensor(sent_masks)
+        if self.cuda:
+            self.sents = {k : v.cuda() for k, v in self.sents.items()}
+            self.sent_lens = self.sent_lens.cuda()
+            self.sent_masks = self.sent_masks.cuda()
+
         if self.train:
             [self.compute_choice_index(e.tgt_actions) for e in self.examples]
 
@@ -119,3 +119,6 @@ class Batch(object):
 
         else:
             raise ValueError("invalid action type", node.action.action_type)
+
+    def __getitem__(self, item):
+        return self.examples[item]

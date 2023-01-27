@@ -1,5 +1,8 @@
 from os.path import join
 import sys
+
+sys.path.append('.')
+
 import pickle
 from components.dataset import Example
 
@@ -25,7 +28,9 @@ def load_dataset(split, transition_system):
         src_line = src_line.rstrip()
         spec_line = spec_line.rstrip()
 
-        src_toks = src_line.split()
+        # src_toks = src_line.split()
+        src_toks = src_line
+
         spec_toks = spec_line.split()
 
         # Parse code to AST
