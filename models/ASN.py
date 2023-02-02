@@ -7,6 +7,7 @@ from grammar.hypothesis import Hypothesis
 import numpy as np
 import os
 from common.config import update_args
+from transformers import AutoModel
 
 
 class ReduceModule(nn.Module):
@@ -60,7 +61,7 @@ class ConstructorTypeModule(nn.Module):
         inputs = self.dropout(inputs)
         contexts = contexts.expand([self.n_field, -1])
         inputs = self.w(torch.cat([inputs, contexts], dim=1)).unsqueeze(0)
-        v_state = (v_state[0].expand(self.n_field, -1).unsqueeze(0), v_state[1].expand(self.n_field, -1).unsqueeze(0))
+        v_state = (v_state[0].expand(self.n_field, -1).unsqueeze(0).contiguous(), v_state[1].expand(self.n_field, -1).unsqueeze(0).contiguous())
         _, outputs = v_lstm(inputs, v_state)
 
         hidden_states = outputs[0].unbind(1)
@@ -92,7 +93,7 @@ class ASNParser(nn.Module):
 
         # encoder
         self.args = args
-        self.src_embedding = EmbeddingLayer(args.src_emb_size, vocab.src_vocab.size(), args.dropout)
+        self.src_embedding = EmbeddingLayer(args.src_emb_size, vocab.src_vocab.size(), args.dropout, train=self.args.train)
         self.encoder = RNNEncoder(args.src_emb_size, args.enc_hid_size, args.dropout, True)
         self.transition_system = transition_system
         self.vocab = vocab
@@ -125,16 +126,17 @@ class ASNParser(nn.Module):
         self.dropout = nn.Dropout(args.dropout)
 
     def score(self, examples):
-        scores = [self._score(ex) for ex in examples]
+        batch = Batch(examples, self.grammar, self.vocab, cuda=self.args.cuda)
 
-        return torch.stack(scores)
+        return torch.stack(self._score(batch))
 
-    def _score(self, ex):
-        batch = Batch([ex], self.grammar, self.vocab)
+    def _score(self, batch):
 
         context_vecs, encoder_outputs = self.encode(batch)
+        # print(context_vecs.shape, encoder_outputs[0].shape, encoder_outputs[1].shape)
         init_state = encoder_outputs
-        return self._score_node(self.grammar.root_type, init_state, ex.tgt_actions, context_vecs, batch.sent_masks, "single")
+        # print(init_state[0][0, :].shape, init_state[1][0, :].shape, context_vecs[:, 0, :].shape)
+        return [self._score_node(self.grammar.root_type, (init_state[0][ex, :].unsqueeze(0), init_state[1][ex, :].unsqueeze(0)), batch[ex].tgt_actions, context_vecs[:, ex, :].unsqueeze(1), batch.sent_masks[ex], "single") for ex in range(len(batch))]
 
     def encode(self, batch):
         sent_lens = batch.sent_lens
@@ -193,14 +195,15 @@ class ASNParser(nn.Module):
 
             return score
 
-    def naive_parse(self, ex):
-        batch = Batch([ex], self.grammar, self.vocab, train=False)        
+    def naive_parse(self, batch):
+
         context_vecs, encoder_outputs = self.encode(batch)
         init_state = encoder_outputs
 
-        action_tree = self._naive_parse(self.grammar.root_type, init_state, context_vecs, batch.sent_masks, 1, 'single')
+        action_tree_list = [self._naive_parse(self.grammar.root_type, (init_state[0][ex, :].unsqueeze(0), init_state[1][ex, :].unsqueeze(0)),
+                          context_vecs[:, ex, :].unsqueeze(1), batch.sent_masks[ex], 1, 'single') for ex in range(len(batch))]
 
-        return self.transition_system.build_ast_from_actions(action_tree)
+        return [self.transition_system.build_ast_from_actions(action_tree) for action_tree in action_tree_list]
 
     def _naive_parse(self, node_type, v_state, context_vecs, context_masks, depth, cardinality="single"):
 
@@ -266,13 +269,10 @@ class ASNParser(nn.Module):
 
                 return ActionTree(action, action_fields)
 
-    def parse(self, ex):  # Is not using
-        batch = Batch([ex], self.grammar, self.vocab, train=False)        
+    def parse(self, batch):  # Is not using
         context_vecs, encoder_outputs = self.encode(batch)
         init_state = encoder_outputs
 
-        # action_tree = self._naive_parse(self.grammar.root_type, init_state, context_vecs, batch.sent_masks, 1)
-        
         completed_hyps = []
         cur_beam = [Hypothesis.init_hypothesis(self.grammar.root_type, init_state)]
         
@@ -371,16 +371,27 @@ class ASNParser(nn.Module):
 
 
 class EmbeddingLayer(nn.Module):
-    def __init__(self, embedding_dim, full_dict_size, embedding_dropout_rate):
+    def __init__(self, embedding_dim, full_dict_size, embedding_dropout_rate, train=False):
         super(EmbeddingLayer, self).__init__()
-        self.embedding = nn.Embedding(full_dict_size, embedding_dim)
+        self.model = AutoModel.from_pretrained("cointegrated/rubert-tiny")
+
+        for param in self.model.parameters():
+            param.requires_grad = train
+
+        self.linear = nn.Linear(312, embedding_dim)
+        self.bn = nn.BatchNorm1d(embedding_dim)
         self.dropout = nn.Dropout(embedding_dropout_rate)
 
-        nn.init.uniform_(self.embedding.weight, -1, 1)
+        nn.init.uniform_(self.linear.weight, -1, 1)
 
-    def forward(self, input_):
-        embedded_words = self.embedding(input_)
-        final_embeddings = self.dropout(embedded_words)
+    def forward(self, input):
+        # print(input)
+        model_output = self.model(**input)
+        embeddings = model_output.last_hidden_state
+        embeddings = self.linear(F.gelu(embeddings))
+        embeddings = self.bn(embeddings.permute(0, 2, 1)).permute(0, 2, 1)
+        # print(embedded_words.shape)
+        final_embeddings = self.dropout(embeddings)
         return final_embeddings
 
 
@@ -421,8 +432,9 @@ class RNNEncoder(nn.Module):
     # the final states h and c from the encoder for each sentence.
     def forward(self, embedded_words, input_lens):
         # Takes the embedded sentences, "packs" them into an efficient Pytorch-internal representation
+        # print(input_lens.cpu())
         packed_embedding = nn.utils.rnn.pack_padded_sequence(
-            embedded_words, input_lens, batch_first=True)
+            embedded_words, input_lens.cpu(), enforce_sorted=False, batch_first=True)
         # Runs the RNN over each sequence. Returns output at each position as well as the last vectors of the RNN
         # state for each sentence (first/last vectors for bidirectional)
         output, hn = self.rnn(packed_embedding)
