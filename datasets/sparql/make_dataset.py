@@ -33,6 +33,8 @@ def load_dataset(split, transition_system):
 
         # sanity check
         reconstructed_expr = transition_system.ast_to_surface_code(spec_ast)
+        # print(reconstructed_expr, "\n")
+        # print(spec_line)
         assert spec_line == reconstructed_expr
 
         # Parse ADSL_AST to ActionTree
@@ -42,6 +44,9 @@ def load_dataset(split, transition_system):
         ast_from_action = transition_system.build_ast_from_actions(tgt_action_tree)
         # generated_code = transition_system.ast_to_surface_code(ast_from_action)
         # target_code = transition_system.ast_to_surface_code(spec_ast)
+        # print(generated_code)
+        # print(target_code)
+
         assert is_equal_ast(ast_from_action, spec_ast)
 
         example = Example(idx=idx,

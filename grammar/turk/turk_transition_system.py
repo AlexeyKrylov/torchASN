@@ -104,7 +104,7 @@ def asdl_ast_to_regex_expr(asdl_ast):
     return " ".join(reg_ast.tokenized_logical_form())
 
 # neglet created time
-def is_equal_ast(this_ast, other_ast):
+def r(this_ast, other_ast):
     if not isinstance(other_ast, this_ast.__class__):
         return False
     # print(this_ast, other_ast)
