@@ -1,0 +1,269 @@
+Index: models/ASN.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\nfrom components.dataset import Batch\nfrom grammar.transition_system import ApplyRuleAction, GenTokenAction, ActionTree, ReduceAction\nfrom grammar.hypothesis import Hypothesis\nimport numpy as np\nimport os\nfrom common.config import update_args\n\n\nclass ReduceModule(nn.Module):\n    def __init__(self, args):\n        super().__init__()\n        self.type = \"Reduce\"\n        self.w = nn.Linear(2 * args.enc_hid_size + args.field_emb_size, 2)\n\n    def forward(self, x):\n        return self.w(x)\n\n    # x b * h\n    def score(self, x, contexts):\n        x = torch.cat([x, contexts], dim=1)\n\n        return F.log_softmax(self.w(x), 1)\n\n\nclass CompositeTypeModule(nn.Module):\n    def __init__(self, args, type_, productions):\n        super().__init__()\n        self.type = type_\n        self.productions = productions\n        self.w = nn.Linear(2 * args.enc_hid_size + args.field_emb_size, len(productions))\n\n    def forward(self, x):\n        return self.w(x)\n\n    # x b * h\n    def score(self, x, contexts):\n        x = torch.cat([x, contexts], dim=1)\n\n        return F.log_softmax(self.w(x), 1)\n\n\nclass ConstructorTypeModule(nn.Module):\n    def __init__(self,  args, production):\n        super().__init__()\n        self.production = production\n        self.n_field = len(production.constructor.fields)\n        self.field_embeddings = nn.Embedding(len(production.constructor.fields), args.field_emb_size)\n        self.w = nn.Linear(2 * args.enc_hid_size + args.field_emb_size, args.enc_hid_size)\n        self.dropout = nn.Dropout(args.dropout)\n    \n    def update(self, v_lstm, v_state, contexts):\n        # v_state, h_n, c_n where 1 * b * h\n        # input: seq_len, batch, input_size\n        # h_0 of shape (1, batch, hidden_size)\n        # v_lstm(, v_state)\n        inputs = self.field_embeddings.weight\n        inputs = self.dropout(inputs)\n        contexts = contexts.expand([self.n_field, -1])\n        inputs = self.w(torch.cat([inputs, contexts], dim=1)).unsqueeze(0)\n        v_state = (v_state[0].expand(self.n_field, -1).unsqueeze(0), v_state[1].expand(self.n_field, -1).unsqueeze(0))\n        _, outputs = v_lstm(inputs, v_state)\n\n        hidden_states = outputs[0].unbind(1)\n        cell_states = outputs[1].unbind(1)\n\n        return list(zip(hidden_states, cell_states))\n\n\nclass PrimitiveTypeModule(nn.Module):\n    def __init__(self, args, type_, vocab):\n        super().__init__()\n        self.type = type_\n        self.vocab = vocab\n        self.w = nn.Linear(2 * args.enc_hid_size + args.field_emb_size, len(vocab))\n\n    def forward(self, x):\n        return self.w(x)\n\n    # x b * h\n    def score(self, x, contexts):\n        x = torch.cat([x, contexts], dim=1)\n\n        return F.log_softmax(self.w(x), 1)\n\n\nclass ASNParser(nn.Module):\n    def __init__(self, args, transition_system, vocab):\n        super().__init__()\n\n        # encoder\n        self.args = args\n        self.src_embedding = EmbeddingLayer(args.src_emb_size, vocab.src_vocab.size(), args.dropout)\n        self.encoder = RNNEncoder(args.src_emb_size, args.enc_hid_size, args.dropout, True)\n        self.transition_system = transition_system\n        self.vocab = vocab\n        grammar = transition_system.grammar\n        self.grammar = grammar\n\n        comp_type_modules = {}\n        for dsl_type in grammar.composite_types:\n            comp_type_modules.update({dsl_type.name:\n                                      CompositeTypeModule(args, dsl_type, grammar.get_prods_by_type(dsl_type))})\n        self.comp_type_dict = nn.ModuleDict(comp_type_modules)\n\n        cnstr_type_modules = {}\n        for prod in grammar.productions:\n            cnstr_type_modules.update({prod.constructor.name:\n                                       ConstructorTypeModule(args, prod)})\n        self.const_type_dict = nn.ModuleDict(cnstr_type_modules)\n\n        prim_type_modules = {}\n        for prim_type in grammar.primitive_types:\n            prim_type_modules.update({prim_type.name:\n                                      PrimitiveTypeModule(args, prim_type, vocab.primitive_vocabs[prim_type])})\n\n        self.prim_type_dict = nn.ModuleDict(prim_type_modules)\n\n        self.reduce_module = ReduceModule(args)\n\n        self.v_lstm = nn.LSTM(args.enc_hid_size, args.enc_hid_size)\n        self.attn = LuongAttention(args.enc_hid_size, 2 * args.enc_hid_size)\n        self.dropout = nn.Dropout(args.dropout)\n\n    def score(self, examples):\n        scores = [self._score(ex) for ex in examples]\n\n        return torch.stack(scores)\n\n    def _score(self, ex):\n        batch = Batch([ex], self.grammar, self.vocab)\n\n        context_vecs, encoder_outputs = self.encode(batch)\n        init_state = encoder_outputs\n        return self._score_node(self.grammar.root_type, init_state, ex.tgt_actions, context_vecs, batch.sent_masks, \"single\")\n\n    def encode(self, batch):\n        sent_lens = batch.sent_lens\n\n        sent_embedding = self.src_embedding(batch.sents)\n\n        context_vecs, final_state = self.encoder(sent_embedding, sent_lens)\n\n        return context_vecs, final_state\n\n    def _score_node(self, node_type, v_state, action_node, context_vecs, context_masks, cardinality):\n        v_output = self.dropout(v_state[0])\n\n        contexts = self.attn(v_output.unsqueeze(0), context_vecs).squeeze(0)\n        score = 0\n\n        if cardinality == \"optional\":\n            scores = self.reduce_module.score(v_state[0], contexts)\n            scores = -1 * scores.view([-1])\n\n            if action_node.action.choice_index == -2:\n                return scores[1]\n\n            score += scores[0]\n\n        if cardinality == \"multiple\":\n\n            self.recursion_v_state = v_state\n\n            for field in action_node:\n                score += self._score_node(node_type, self.recursion_v_state, field, context_vecs, context_masks, \"optional\")\n\n            return score\n\n        if node_type.is_primitive_type():\n            module = self.prim_type_dict[node_type.name]\n            scores = module.score(v_output, contexts)\n            score += -1 * scores.view([-1])[action_node.action.choice_index]\n\n            return score\n\n        else:\n            cnstr = action_node.action.choice.constructor\n\n            comp_module = self.comp_type_dict[node_type.name]\n            scores = comp_module.score(v_output, contexts)\n            score += -1 * scores.view([-1])[action_node.action.choice_index]\n\n            cnstr_module = self.const_type_dict[cnstr.name]\n\n            cnstr_results = cnstr_module.update(self.v_lstm, v_state, contexts)\n\n            for next_field, next_state, next_action in zip(cnstr.fields, cnstr_results, action_node.fields):\n                self.recursion_v_state = next_state\n                score += self._score_node(next_field.type, next_state, next_action, context_vecs, context_masks, next_field.cardinality)\n\n            return score\n\n    def naive_parse(self, ex):\n        batch = Batch([ex], self.grammar, self.vocab, train=False)        \n        context_vecs, encoder_outputs = self.encode(batch)\n        init_state = encoder_outputs\n\n        action_tree = self._naive_parse(self.grammar.root_type, init_state, context_vecs, batch.sent_masks, 1, 'single')\n\n        return self.transition_system.build_ast_from_actions(action_tree)\n\n    def _naive_parse(self, node_type, v_state, context_vecs, context_masks, depth, cardinality=\"single\"):\n\n        contexts = self.attn(v_state[0].unsqueeze(0), context_vecs).squeeze(0)\n\n        if cardinality == \"optional\":\n\n            scores = self.reduce_module.score(v_state[0], contexts).cpu().numpy().flatten()\n            is_reduce = np.argmax(scores)\n\n            if is_reduce or (depth > self.args.max_depth):\n                return ActionTree(ReduceAction())\n\n        if cardinality == \"multiple\":\n            action_fields = []\n            self.recursion_v_state = v_state\n\n            for _ in range(self.args.max_depth):\n                depth += 1\n\n                action_tree = self._naive_parse(node_type, self.recursion_v_state, context_vecs, context_masks, depth, \"optional\")\n                action_fields.append(action_tree)\n\n                if isinstance(action_tree.action, ReduceAction):\n                    break\n\n            return action_fields\n\n        else:\n\n            # Primitive\n            if node_type.is_primitive_type():\n                module = self.prim_type_dict[node_type.name]\n                scores = module.score(v_state[0], contexts).cpu().numpy().flatten()\n\n                choice_idx = np.argmax(scores)\n\n                a = module.vocab.get_word(choice_idx)\n\n                return ActionTree(GenTokenAction(node_type, a))\n\n            else:  # Composite\n\n                comp_module = self.comp_type_dict[node_type.name]\n                scores = comp_module.score(v_state[0], contexts).cpu().numpy().flatten()\n                choice_idx = np.argmax(scores)\n                production = comp_module.productions[choice_idx]\n\n                action = ApplyRuleAction(node_type, production)\n\n                cnstr = production.constructor\n\n                cnstr_module = self.const_type_dict[cnstr.name]\n\n                cnstr_results = cnstr_module.update(self.v_lstm, v_state, contexts)\n\n                action_fields = []\n                for next_field, next_state in zip(cnstr.fields, cnstr_results):\n                    self.recursion_v_state = next_state\n                    action_fields.append(self._naive_parse(next_field.type, next_state,\n                                                           context_vecs, context_masks, depth + 1,\n                                                           next_field.cardinality))\n\n                return ActionTree(action, action_fields)\n\n    def parse(self, ex):  # Is not using\n        batch = Batch([ex], self.grammar, self.vocab, train=False)        \n        context_vecs, encoder_outputs = self.encode(batch)\n        init_state = encoder_outputs\n\n        # action_tree = self._naive_parse(self.grammar.root_type, init_state, context_vecs, batch.sent_masks, 1)\n        \n        completed_hyps = []\n        cur_beam = [Hypothesis.init_hypothesis(self.grammar.root_type, init_state)]\n        \n        for ts in range(self.args.max_decode_step):\n            hyp_pools = []\n            for hyp in cur_beam:\n                continuations = self.continuations_of_hyp(hyp, context_vecs, batch.sent_masks)\n                hyp_pools.extend(continuations)\n            \n            hyp_pools.sort(key=lambda x: x.score, reverse=True)\n            # next_beam = next_beam[:self.args.beam_size]\n            \n            num_slots = self.args.beam_size - len(completed_hyps)\n\n            cur_beam = []\n            for hyp_i, hyp in enumerate(hyp_pools[:num_slots]):\n                if hyp.is_complete():\n                    completed_hyps.append(hyp)\n                else:\n                    cur_beam.append(hyp)\n            \n            if not cur_beam:\n                break\n        \n        completed_hyps.sort(key=lambda x: x.score, reverse=True)\n        return completed_hyps\n\n    def continuations_of_hyp(self, hyp, context_vecs, context_masks):\n        \n        pending_node, v_state = hyp.get_pending_node()\n        \n        contexts = self.attn(v_state[0].unsqueeze(0), context_vecs).squeeze(0)\n\n        node_type = pending_node.action.type\n\n        if node_type.is_primitive_type():\n            module = self.prim_type_dict[node_type.name]\n\n            scores = module.score(v_state[0], contexts).cpu().numpy().flatten()\n\n            continuous = []\n            for choice_idx, score in enumerate(scores):\n                continuous.append(hyp.copy_and_apply_action(GenTokenAction(node_type, module.vocab.get_word(choice_idx)), score))\n            return continuous\n\n        comp_module = self.comp_type_dict[node_type.name]\n        scores = comp_module.score(v_state[0], contexts).cpu().numpy().flatten()\n\n        continuous = []\n        for choice_idx, score in enumerate(scores):\n            production = comp_module.productions[choice_idx]\n            action = ApplyRuleAction(node_type, production)\n            cnstr = production.constructor\n            cnstr_module = self.const_type_dict[cnstr.name]\n            cnstr_results = cnstr_module.update(self.v_lstm, v_state, contexts)\n            continuous.append(hyp.copy_and_apply_action(action, score, cnstr_results))\n\n        return continuous\n\n    def save(self, filename):\n        dir_name = os.path.dirname(filename)\n        if not os.path.exists(dir_name):\n            os.makedirs(dir_name)\n\n        params = {\n            'args': self.args,\n            'transition_system': self.transition_system,\n            'vocab': self.vocab,\n            'state_dict': self.state_dict()\n        }\n        torch.save(params, filename)\n\n    @classmethod\n    def load(cls, model_path, ex_args=None, cuda=False):\n        params = torch.load(model_path)\n        vocab = params['vocab']\n        transition_system = params['transition_system']\n        saved_args = params['args']\n        # update saved args\n        saved_state = params['state_dict']\n        saved_args.cuda = cuda\n        if ex_args:\n            update_args(saved_args, ex_args)\n        parser = cls(saved_args, transition_system, vocab)\n        parser.load_state_dict(saved_state)\n\n        if cuda:\n            parser = parser.cuda()\n\n        parser.eval()\n\n        return parser\n\n    def forward(self, input_):\n        return [self.naive_parse(ex) for ex in input_]\n\n\nclass EmbeddingLayer(nn.Module):\n    def __init__(self, embedding_dim, full_dict_size, embedding_dropout_rate):\n        super(EmbeddingLayer, self).__init__()\n        self.embedding = nn.Embedding(full_dict_size, embedding_dim)\n        self.dropout = nn.Dropout(embedding_dropout_rate)\n\n        nn.init.uniform_(self.embedding.weight, -1, 1)\n\n    def forward(self, input_):\n        embedded_words = self.embedding(input_)\n        final_embeddings = self.dropout(embedded_words)\n        return final_embeddings\n\n\nclass RNNEncoder(nn.Module):\n    # Parameters: input size (should match embedding layer), hidden size for the LSTM, dropout rate for the RNN,\n    # and a boolean flag for whether we're using a bidirectional encoder or not\n    def __init__(self, input_size, hidden_size, dropout, bidirect):\n        super(RNNEncoder, self).__init__()\n        self.bidirect = bidirect\n        self.input_size = input_size\n        self.hidden_size = hidden_size\n        self.reduce_h_W = nn.Linear(hidden_size * 2, hidden_size, bias=True)\n        self.reduce_c_W = nn.Linear(hidden_size * 2, hidden_size, bias=True)\n        self.rnn = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True, bidirectional=self.bidirect)\n        self.init_weight()\n        self.dropout = nn.Dropout(dropout)\n\n    # Initializes weight matrices using Xavier initialization\n    def init_weight(self):\n        nn.init.xavier_uniform_(self.rnn.weight_hh_l0, gain=1)\n        nn.init.xavier_uniform_(self.rnn.weight_ih_l0, gain=1)\n        if self.bidirect:\n            nn.init.xavier_uniform_(self.rnn.weight_hh_l0_reverse, gain=1)\n            nn.init.xavier_uniform_(self.rnn.weight_ih_l0_reverse, gain=1)\n        nn.init.constant_(self.rnn.bias_hh_l0, 0)\n        nn.init.constant_(self.rnn.bias_ih_l0, 0)\n        if self.bidirect:\n            nn.init.constant_(self.rnn.bias_hh_l0_reverse, 0)\n            nn.init.constant_(self.rnn.bias_ih_l0_reverse, 0)\n\n    def get_output_size(self):\n        return self.hidden_size * 2 if self.bidirect else self.hidden_size\n\n    # embedded_words should be a [batch size x sent len x input dim] tensor\n    # input_lens is a tensor containing the length of each input sentence\n    # Returns output (each word's representation), context_mask (a mask of 0s and 1s\n    # reflecting where the model's output should be considered), and h_t, a *tuple* containing\n    # the final states h and c from the encoder for each sentence.\n    def forward(self, embedded_words, input_lens):\n        # Takes the embedded sentences, \"packs\" them into an efficient Pytorch-internal representation\n        packed_embedding = nn.utils.rnn.pack_padded_sequence(\n            embedded_words, input_lens, batch_first=True)\n        # Runs the RNN over each sequence. Returns output at each position as well as the last vectors of the RNN\n        # state for each sentence (first/last vectors for bidirectional)\n        output, hn = self.rnn(packed_embedding)\n        # Unpacks the Pytorch representation into normal tensors\n        output, _ = nn.utils.rnn.pad_packed_sequence(output)\n\n        # Grabs the encoded representations out of hn, which is a weird tuple thing.\n        # Note: if you want multiple LSTM layers, you'll need to change this to consult the penultimate layer\n        # or gather representations from all layers.\n        if self.bidirect:\n            h, c = hn[0], hn[1]\n            # Grab the representations from forward and backward LSTMs\n            h_, c_ = torch.cat((h[0], h[1]), dim=1), torch.cat(\n                (c[0], c[1]), dim=1)\n            # Reduce them by multiplying by a weight matrix so that the hidden size sent to the decoder is the same\n            # as the hidden size in the encoder\n            new_h = self.reduce_h_W(h_)\n            new_c = self.reduce_c_W(c_)\n            h_t = (new_h, new_c)\n        else:\n            h, c = hn[0][0], hn[1][0]\n            h_t = (h, c)\n        # print(max_length, output.size(), h_t[0].size(), h_t[1].size())\n\n        output = self.dropout(output)\n        # print(output.shape, h_t[0].shape, h_t[1].shape)\n        return output, h_t\n\n\nclass LuongAttention(nn.Module):\n\n    def __init__(self, hidden_size, context_size=None):\n        super(LuongAttention, self).__init__()\n        self.hidden_size = hidden_size\n        self.context_size = hidden_size if context_size is None else context_size\n        self.attn = torch.nn.Linear(self.context_size, self.hidden_size)\n\n        self.init_weight()\n\n    def init_weight(self):\n        nn.init.xavier_uniform_(self.attn.weight, gain=1)\n        nn.init.constant_(self.attn.bias, 0)\n\n    # input query: batch * q * hidden, contexts: c * batch * hidden\n    # output: batch * len * q * c\n    def forward(self, query, context, inf_mask=None, requires_weight=False):\n        # Calculate the attention weights (energies) based on the given method\n        query = query.transpose(0, 1)\n        context = context.transpose(0, 1)\n        # print(query.shape, context.shape)\n        e = self.attn(context)\n        # print(e.shape)\n        # e: B * Q * C\n        # print(query.shape, e.transpose(1, 2).shape)\n        e = torch.matmul(query, e.transpose(1, 2))\n        if inf_mask is not None:\n            e = e + inf_mask.unsqueeze(1)\n\n        # dim w: B * Q * C, context: B * C * H, wanted B * Q * H\n        # print(e.shape)\n        w = F.softmax(e, dim=2)\n        # print(w.shape, context.shape)\n        c = torch.matmul(w, context)\n        # # Return the softmax normalized probability scores (with added dimension\n        if requires_weight:\n            return c.transpose(0, 1), w\n        # print(c.transpose(0, 1).shape)\n        return c.transpose(0, 1)\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/models/ASN.py b/models/ASN.py
+--- a/models/ASN.py	(revision 57ae0664a94c6c3167d8b3ee094df03104767fc9)
++++ b/models/ASN.py	(date 1675336353607)
+@@ -43,14 +43,14 @@
+ 
+ 
+ class ConstructorTypeModule(nn.Module):
+-    def __init__(self,  args, production):
++    def __init__(self, args, production):
+         super().__init__()
+         self.production = production
+         self.n_field = len(production.constructor.fields)
+         self.field_embeddings = nn.Embedding(len(production.constructor.fields), args.field_emb_size)
+         self.w = nn.Linear(2 * args.enc_hid_size + args.field_emb_size, args.enc_hid_size)
+         self.dropout = nn.Dropout(args.dropout)
+-    
++
+     def update(self, v_lstm, v_state, contexts):
+         # v_state, h_n, c_n where 1 * b * h
+         # input: seq_len, batch, input_size
+@@ -102,19 +102,19 @@
+         comp_type_modules = {}
+         for dsl_type in grammar.composite_types:
+             comp_type_modules.update({dsl_type.name:
+-                                      CompositeTypeModule(args, dsl_type, grammar.get_prods_by_type(dsl_type))})
++                                          CompositeTypeModule(args, dsl_type, grammar.get_prods_by_type(dsl_type))})
+         self.comp_type_dict = nn.ModuleDict(comp_type_modules)
+ 
+         cnstr_type_modules = {}
+         for prod in grammar.productions:
+             cnstr_type_modules.update({prod.constructor.name:
+-                                       ConstructorTypeModule(args, prod)})
++                                           ConstructorTypeModule(args, prod)})
+         self.const_type_dict = nn.ModuleDict(cnstr_type_modules)
+ 
+         prim_type_modules = {}
+         for prim_type in grammar.primitive_types:
+             prim_type_modules.update({prim_type.name:
+-                                      PrimitiveTypeModule(args, prim_type, vocab.primitive_vocabs[prim_type])})
++                                          PrimitiveTypeModule(args, prim_type, vocab.primitive_vocabs[prim_type])})
+ 
+         self.prim_type_dict = nn.ModuleDict(prim_type_modules)
+ 
+@@ -134,14 +134,17 @@
+ 
+         context_vecs, encoder_outputs = self.encode(batch)
+         init_state = encoder_outputs
+-        return self._score_node(self.grammar.root_type, init_state, ex.tgt_actions, context_vecs, batch.sent_masks, "single")
++        return self._score_node(self.grammar.root_type, init_state, ex.tgt_actions, context_vecs, batch.sent_masks,
++                                "single")
+ 
+     def encode(self, batch):
+         sent_lens = batch.sent_lens
+ 
+         sent_embedding = self.src_embedding(batch.sents)
+-
+-        context_vecs, final_state = self.encoder(sent_embedding, sent_lens)
++        try:
++            context_vecs, final_state = self.encoder(sent_embedding, sent_lens)
++        except RuntimeError:
++            print()
+ 
+         return context_vecs, final_state
+ 
+@@ -165,7 +168,8 @@
+             self.recursion_v_state = v_state
+ 
+             for field in action_node:
+-                score += self._score_node(node_type, self.recursion_v_state, field, context_vecs, context_masks, "optional")
++                score += self._score_node(node_type, self.recursion_v_state, field, context_vecs, context_masks,
++                                          "optional")
+ 
+             return score
+ 
+@@ -189,12 +193,13 @@
+ 
+             for next_field, next_state, next_action in zip(cnstr.fields, cnstr_results, action_node.fields):
+                 self.recursion_v_state = next_state
+-                score += self._score_node(next_field.type, next_state, next_action, context_vecs, context_masks, next_field.cardinality)
++                score += self._score_node(next_field.type, next_state, next_action, context_vecs, context_masks,
++                                          next_field.cardinality)
+ 
+             return score
+ 
+     def naive_parse(self, ex):
+-        batch = Batch([ex], self.grammar, self.vocab, train=False)        
++        batch = Batch([ex], self.grammar, self.vocab, train=False)
+         context_vecs, encoder_outputs = self.encode(batch)
+         init_state = encoder_outputs
+ 
+@@ -221,7 +226,8 @@
+             for _ in range(self.args.max_depth):
+                 depth += 1
+ 
+-                action_tree = self._naive_parse(node_type, self.recursion_v_state, context_vecs, context_masks, depth, "optional")
++                action_tree = self._naive_parse(node_type, self.recursion_v_state, context_vecs, context_masks, depth,
++                                                "optional")
+                 action_fields.append(action_tree)
+ 
+                 if isinstance(action_tree.action, ReduceAction):
+@@ -267,24 +273,24 @@
+                 return ActionTree(action, action_fields)
+ 
+     def parse(self, ex):  # Is not using
+-        batch = Batch([ex], self.grammar, self.vocab, train=False)        
++        batch = Batch([ex], self.grammar, self.vocab, train=False)
+         context_vecs, encoder_outputs = self.encode(batch)
+         init_state = encoder_outputs
+ 
+         # action_tree = self._naive_parse(self.grammar.root_type, init_state, context_vecs, batch.sent_masks, 1)
+-        
++
+         completed_hyps = []
+         cur_beam = [Hypothesis.init_hypothesis(self.grammar.root_type, init_state)]
+-        
++
+         for ts in range(self.args.max_decode_step):
+             hyp_pools = []
+             for hyp in cur_beam:
+                 continuations = self.continuations_of_hyp(hyp, context_vecs, batch.sent_masks)
+                 hyp_pools.extend(continuations)
+-            
++
+             hyp_pools.sort(key=lambda x: x.score, reverse=True)
+             # next_beam = next_beam[:self.args.beam_size]
+-            
++
+             num_slots = self.args.beam_size - len(completed_hyps)
+ 
+             cur_beam = []
+@@ -293,17 +299,17 @@
+                     completed_hyps.append(hyp)
+                 else:
+                     cur_beam.append(hyp)
+-            
++
+             if not cur_beam:
+                 break
+-        
++
+         completed_hyps.sort(key=lambda x: x.score, reverse=True)
+         return completed_hyps
+ 
+     def continuations_of_hyp(self, hyp, context_vecs, context_masks):
+-        
++
+         pending_node, v_state = hyp.get_pending_node()
+-        
++
+         contexts = self.attn(v_state[0].unsqueeze(0), context_vecs).squeeze(0)
+ 
+         node_type = pending_node.action.type
+@@ -315,7 +321,8 @@
+ 
+             continuous = []
+             for choice_idx, score in enumerate(scores):
+-                continuous.append(hyp.copy_and_apply_action(GenTokenAction(node_type, module.vocab.get_word(choice_idx)), score))
++                continuous.append(
++                    hyp.copy_and_apply_action(GenTokenAction(node_type, module.vocab.get_word(choice_idx)), score))
+             return continuous
+ 
+         comp_module = self.comp_type_dict[node_type.name]
+@@ -490,4 +497,4 @@
+         if requires_weight:
+             return c.transpose(0, 1), w
+         # print(c.transpose(0, 1).shape)
+-        return c.transpose(0, 1)
++        return c.transpose(0, 1)
+\ No newline at end of file
+Index: models/nn_utils.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># coding=utf-8\n\nimport torch\nimport torch.nn.functional as F\nimport torch.nn.init as init\nimport numpy as np\n\nimport torch\nimport torch.nn as nn\nfrom torch.autograd import Variable\nimport numpy as np\n\nfrom six.moves import xrange\n\n\ndef dot_prod_attention(h_t, src_encoding, src_encoding_att_linear, mask=None):\n    \"\"\"\n    :param h_t: (batch_size, hidden_size)\n    :param src_encoding: (batch_size, src_sent_len, hidden_size * 2)\n    :param src_encoding_att_linear: (batch_size, src_sent_len, hidden_size)\n    :param mask: (batch_size, src_sent_len)\n    \"\"\"\n    # (batch_size, src_sent_len)\n    att_weight = torch.bmm(src_encoding_att_linear, h_t.unsqueeze(2)).squeeze(2)\n    if mask is not None:\n        att_weight.data.masked_fill_(mask.bool(), -float('inf'))\n    att_weight = F.softmax(att_weight, dim=-1)\n\n    att_view = (att_weight.size(0), 1, att_weight.size(1))\n    # (batch_size, hidden_size)\n    ctx_vec = torch.bmm(att_weight.view(*att_view), src_encoding).squeeze(1)\n\n    return ctx_vec, att_weight\n\n\ndef length_array_to_mask_tensor(length_array, cuda=False, valid_entry_has_mask_one=False):\n    max_len = max(length_array)\n    batch_size = len(length_array)\n\n    mask = np.zeros((batch_size, max_len), dtype=np.uint8)\n    for i, seq_len in enumerate(length_array):\n        if valid_entry_has_mask_one:\n            mask[i][:seq_len] = 1\n        else:\n            mask[i][seq_len:] = 1\n\n    mask = torch.ByteTensor(mask)\n    return mask.cuda() if cuda else mask\n\n\ndef input_transpose(sents, pad_token):\n    \"\"\"\n    transform the input List[sequence] of size (batch_size, max_sent_len)\n    into a list of size (max_sent_len, batch_size), with proper padding\n    \"\"\"\n    max_len = max(len(s) for s in sents)\n    batch_size = len(sents)\n\n    sents_t = []\n    for i in xrange(max_len):\n        sents_t.append([sents[k][i] if len(sents[k]) > i else pad_token for k in xrange(batch_size)])\n\n    return sents_t\n\n\ndef word2id(sents, vocab):\n    if type(sents[0]) == list:\n        return [[vocab[w] for w in s] for s in sents]\n    else:\n        return [vocab[w] for w in sents]\n\n\ndef id2word(sents, vocab):\n    if type(sents[0]) == list:\n        return [[vocab.id2word[w] for w in s] for s in sents]\n    else:\n        return [vocab.id2word[w] for w in sents]\n\n\ndef to_input_variable(sequences, vocab, cuda=False, training=True, append_boundary_sym=False):\n    \"\"\"\n    given a list of sequences,\n    return a tensor of shape (max_sent_len, batch_size)\n    \"\"\"\n    if append_boundary_sym:\n        sequences = [['<s>'] + seq + ['</s>'] for seq in sequences]\n\n    word_ids = word2id(sequences, vocab)\n    sents_t = input_transpose(word_ids, vocab['<pad>'])\n\n    # sents_var = Variable(torch.LongTensor(sents_t), volatile=(not training), requires_grad=False)\n    if training:\n        sents_var = torch.LongTensor(sents_t)\n    else:\n        with torch.no_grad():\n            sents_var = torch.LongTensor(sents_t)\n    if cuda:\n        sents_var = sents_var.cuda()\n\n    return sents_var\n\n\ndef variable_constr(x, v, cuda=False):\n    return Variable(torch.cuda.x(v)) if cuda else Variable(torch.x(v))\n\n\ndef batch_iter(examples, batch_size, shuffle=False):\n    index_arr = np.arange(len(examples))\n    if shuffle:\n        np.random.shuffle(index_arr)\n\n    batch_num = int(np.ceil(len(examples) / float(batch_size)))\n    for batch_id in xrange(batch_num):\n        batch_ids = index_arr[batch_size * batch_id: batch_size * (batch_id + 1)]\n        batch_examples = [examples[i] for i in batch_ids]\n\n        yield batch_examples\n\n\ndef isnan(data):\n    data = data.cpu().numpy()\n    return np.isnan(data).any() or np.isinf(data).any()\n\n\ndef log_sum_exp(inputs, dim=None, keepdim=False):\n    \"\"\"Numerically stable logsumexp.\n       source: https://github.com/pytorch/pytorch/issues/2591\n\n    Args:\n        inputs: A Variable with any shape.\n        dim: An integer.\n        keepdim: A boolean.\n\n    Returns:\n        Equivalent of log(sum(exp(inputs), dim=dim, keepdim=keepdim)).\n    \"\"\"\n    # For a 1-D array x (any array along a single dimension),\n    # log sum exp(x) = s + log sum exp(x - s)\n    # with s = max(x) being a common choice.\n\n    if dim is None:\n        inputs = inputs.view(-1)\n        dim = 0\n    s, _ = torch.max(inputs, dim=dim, keepdim=True)\n    outputs = s + (inputs - s).exp().sum(dim=dim, keepdim=True).log()\n    if not keepdim:\n        outputs = outputs.squeeze(dim)\n    return outputs\n\n\ndef uniform_init(lower, upper, params):\n    for p in params:\n        p.data.uniform_(lower, upper)\n\n\ndef glorot_init(params):\n    for p in params:\n        if len(p.data.size()) > 1:\n            init.xavier_normal_(p.data)\n\n\ndef identity(x):\n    return x\n\n\nclass LabelSmoothing(nn.Module):\n    \"\"\"Implement label smoothing.\n\n    Reference: the annotated transformer\n    \"\"\"\n\n    def __init__(self, smoothing, tgt_vocab_size, ignore_indices=None):\n        if ignore_indices is None: ignore_indices = []\n\n        super(LabelSmoothing, self).__init__()\n\n        self.criterion = nn.KLDivLoss(reduction='none')\n        smoothing_value = smoothing / float(tgt_vocab_size - 1 - len(ignore_indices))\n        one_hot = torch.zeros((tgt_vocab_size,)).fill_(smoothing_value)\n        for idx in ignore_indices:\n            one_hot[idx] = 0.\n\n        self.confidence = 1.0 - smoothing\n        self.register_buffer('one_hot', one_hot.unsqueeze(0))\n\n    def forward(self, model_prob, target):\n        # (batch_size, *, tgt_vocab_size)\n        dim = list(model_prob.size())[:-1] + [1]\n        true_dist = Variable(self.one_hot, requires_grad=False).repeat(*dim)\n        true_dist.scatter_(-1, target.unsqueeze(-1), self.confidence)\n        # true_dist = model_prob.data.clone()\n        # true_dist.fill_(self.smoothing / (model_prob.size(1) - 1))  # FIXME: no label smoothing for <pad> <s> and </s>\n        # true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)\n\n        return self.criterion(model_prob, true_dist).sum(dim=-1)\n\n\nclass FeedForward(nn.Module):\n    \"\"\"Feed forward neural network adapted from AllenNLP\"\"\"\n\n    def __init__(self, input_dim, num_layers, hidden_dims, activations, dropout):\n        super(FeedForward, self).__init__()\n\n        if not isinstance(hidden_dims, list):\n            hidden_dims = [hidden_dims] * num_layers  # type: ignore\n        if not isinstance(activations, list):\n            activations = [activations] * num_layers  # type: ignore\n        if not isinstance(dropout, list):\n            dropout = [dropout] * num_layers  # type: ignore\n\n        self.activations = activations\n        input_dims = [input_dim] + hidden_dims[:-1]\n        linear_layers = []\n        for layer_input_dim, layer_output_dim in zip(input_dims, hidden_dims):\n            linear_layers.append(nn.Linear(layer_input_dim, layer_output_dim))\n\n        self.linear_layers = nn.ModuleList(linear_layers)\n        dropout_layers = [nn.Dropout(p=value) for value in dropout]\n        self.dropout = nn.ModuleList(dropout_layers)\n        self.output_dim = hidden_dims[-1]\n        self.input_dim = input_dim\n\n    def forward(self, x):\n        output = x\n        for layer, activation, dropout in zip(self.linear_layers, self.activations, self.dropout):\n            output = dropout(activation(layer(output)))\n        return output\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/models/nn_utils.py b/models/nn_utils.py
+--- a/models/nn_utils.py	(revision 57ae0664a94c6c3167d8b3ee094df03104767fc9)
++++ b/models/nn_utils.py	(date 1674078876667)
+@@ -3,7 +3,6 @@
+ import torch
+ import torch.nn.functional as F
+ import torch.nn.init as init
+-import numpy as np
+ 
+ import torch
+ import torch.nn as nn
+Index: train.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from common.config import *\nfrom components.dataset import *\n\nfrom grammar.grammar import Grammar\n\nfrom grammar.sparql.sparql_transition_system import SparqlTransitionSystem\nfrom models.ASN import ASNParser\nfrom models import nn_utils\n\nfrom torch import optim\n\nimport time\n\n\ndef train(args):\n\n    train_set = Dataset.from_bin_file(args.train_file)\n    if args.dev_file:\n        dev_set = Dataset.from_bin_file(args.dev_file)\n    else:\n        dev_set = Dataset(examples=[])\n    \n    vocab = pickle.load(open(args.vocab, 'rb'))\n    grammar = Grammar.from_text(open(args.asdl_file).read())\n\n    transition_system = SparqlTransitionSystem(grammar)\n    \n    parser = ASNParser(args, transition_system, vocab)\n\n    nn_utils.glorot_init(parser.parameters())\n\n    optimizer = optim.Adam(parser.parameters(), lr=args.lr)\n    best_acc = 0.0\n    log_every = args.log_every\n    \n    train_begin = time.time()\n    for epoch in range(1, args.max_epoch + 1):\n        train_iter = 0\n        loss_val = 0.\n        epoch_loss = 0.\n\n        parser.train()\n\n        epoch_begin = time.time()\n        for batch_example in train_set.batch_iter(batch_size=args.batch_size, shuffle=False):\n            optimizer.zero_grad()\n            loss = parser.score(batch_example)\n            loss_val += torch.sum(loss).data.item()\n            epoch_loss += torch.sum(loss).data.item()\n            loss = torch.mean(loss)\n\n            loss.backward()\n            torch.nn.utils.clip_grad_norm_(parser.parameters(), args.clip_grad)\n\n            optimizer.step()\n            train_iter += 1\n            if train_iter % log_every == 0:\n                print(\"[epoch {}, step {}] loss: {:.3f}\".format(epoch, train_iter, loss_val / (log_every * args.batch_size)))\n                loss_val = 0.\n\n        print('[epoch {}] train loss {:.3f}, epoch time {:.0f}, total time {:.0f}'.format(epoch, epoch_loss / len(train_set), time.time() - epoch_begin, time.time() - train_begin))\n\n        if epoch > args.run_val_after:\n            eval_begin = time.time()\n            parser.eval()\n            with torch.no_grad():\n                parse_results = [(parser.naive_parse(ex), ex.tgt_ast) for ex in dev_set]\n                to_print = [transition_system.ast_to_surface_code(x[0]) for x in parse_results]\n                to_print_target = [transition_system.ast_to_surface_code(x[1]) for x in parse_results]\n\n            print(to_print)\n            print(\"-\"*10)\n            print(to_print_target)\n\n            match_results = [x == y for x, y in zip(to_print, to_print_target)]\n            match_acc = sum(match_results) * 1. / len(match_results)\n\n            print('[epoch {}] eval acc {:.3f}, eval time {:.0f}'.format(epoch, match_acc, time.time() - eval_begin))\n\n            if match_acc >= best_acc:\n                best_acc = match_acc\n                parser.save(args.save_to)\n\n\nif __name__ == '__main__':\n    args = parse_args('train')\n    train(args)\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/train.py b/train.py
+--- a/train.py	(revision 57ae0664a94c6c3167d8b3ee094df03104767fc9)
++++ b/train.py	(date 1674082601293)
+@@ -11,7 +11,6 @@
+ 
+ import time
+ 
+-
+ def train(args):
+ 
+     train_set = Dataset.from_bin_file(args.train_file)
+Index: common/config.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># coding=utf-8\nimport argparse\n\n\ndef update_args(args, ex_args):\n    for k, v in ex_args.__dict__.items():\n        setattr(args, k, v)\n\n\ndef _add_test_args(parser):\n    parser.add_argument('--test_file', default='data/sparql/test.bin', type=str, help='path to the test set file')\n    parser.add_argument('--model_file', default='checkpoints/logs.pt', type=str, help='path to the model file')\n    parser.add_argument('--beam_size', default=100, type=int, help='decoder beam size')\n    parser.add_argument('--max_decode_step', default=100, type=int, help='maximum decode step')\n\n\ndef _add_train_args(parser):\n    # arg_parser.add_argument('--cuda', action='store_true', default=False, help='Use gpu')\n    parser.add_argument('--asdl_file', default='data/sparql/sparql_asdl.txt', type=str, help='Path to ASDL grammar specification')\n    parser.add_argument('--vocab', default='data/sparql/vocab.bin', type=str, help='Path of the serialized vocabulary')\n    parser.add_argument('--save_to', type=str, default='checkpoints/logs.pt', help='save the model to')\n    parser.add_argument('--train_file', default='data/sparql/train.bin', type=str, help='path to the training target file')\n\n    parser.add_argument('--dev_file', default='data/sparql/dev.bin',  type=str, help='path to the dev source file')\n\n    parser.add_argument('--enc_hid_size', default=128,  type=int, help='encoder hidden size')\n    parser.add_argument('--src_emb_size', default=128,  type=int, help='sentence embedding size')\n    parser.add_argument('--field_emb_size', default=128, type=int, help='field embedding size')\n    parser.add_argument('--dropout', type=float, default=0.2, help='dropout rate')\n\n    parser.add_argument('--batch_size', default=100,  type=int, help='batch size')\n    parser.add_argument('--max_epoch', default=100, type=int, help='max epoch')\n    parser.add_argument('--max_depth', default=12, type=int, help='maximum depth of action tree')\n\n    parser.add_argument('--clip_grad', type=float, default=10.0, help='clip grad to')\n    parser.add_argument('--lr', type=float, default=.003, help='learning rate')\n\n    parser.add_argument('--log_every', default=30, type=int, help='log every iter')\n    parser.add_argument('--run_val_after', type=int, default=1, help='run validation after')\n    parser.add_argument('--max_decode_step', default=100, type=int, help='maximum decode step')\n\n\ndef parse_args(mode):\n    parser = argparse.ArgumentParser()\n\n    if mode == 'train':\n        _add_train_args(parser)\n    elif mode == 'test':\n        _add_test_args(parser)\n    else:\n        raise RuntimeError('unknown mode')\n    \n    args = parser.parse_args()\n    print(args)\n    return args\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/common/config.py b/common/config.py
+--- a/common/config.py	(revision 57ae0664a94c6c3167d8b3ee094df03104767fc9)
++++ b/common/config.py	(date 1674082067407)
+@@ -8,20 +8,20 @@
+ 
+ 
+ def _add_test_args(parser):
+-    parser.add_argument('--test_file', default='data/sparql/test.bin', type=str, help='path to the test set file')
+-    parser.add_argument('--model_file', default='checkpoints/logs.pt', type=str, help='path to the model file')
++    parser.add_argument('--test_file', default='/Users/darby/Desktop/MIPT/master/torchASN/data/sparql/test.bin', type=str, help='path to the test set file')
++    parser.add_argument('--model_file', default='/Users/darby/Desktop/MIPT/master/torchASN/checkpoints/logs.pt', type=str, help='path to the model file')
+     parser.add_argument('--beam_size', default=100, type=int, help='decoder beam size')
+     parser.add_argument('--max_decode_step', default=100, type=int, help='maximum decode step')
+ 
+ 
+ def _add_train_args(parser):
+     # arg_parser.add_argument('--cuda', action='store_true', default=False, help='Use gpu')
+-    parser.add_argument('--asdl_file', default='data/sparql/sparql_asdl.txt', type=str, help='Path to ASDL grammar specification')
+-    parser.add_argument('--vocab', default='data/sparql/vocab.bin', type=str, help='Path of the serialized vocabulary')
+-    parser.add_argument('--save_to', type=str, default='checkpoints/logs.pt', help='save the model to')
+-    parser.add_argument('--train_file', default='data/sparql/train.bin', type=str, help='path to the training target file')
++    parser.add_argument('--asdl_file', default='/Users/darby/Desktop/MIPT/master/torchASN/data/sparql/sparql_asdl.txt', type=str, help='Path to ASDL grammar specification')
++    parser.add_argument('--vocab', default='/Users/darby/Desktop/MIPT/master/torchASN/data/sparql/vocab.bin', type=str, help='Path of the serialized vocabulary')
++    parser.add_argument('--save_to', type=str, default='/Users/darby/Desktop/MIPT/master/torchASN/checkpoints/logs.pt', help='save the model to')
++    parser.add_argument('--train_file', default='/Users/darby/Desktop/MIPT/master/torchASN/data/sparql/train.bin', type=str, help='path to the training target file')
+ 
+-    parser.add_argument('--dev_file', default='data/sparql/dev.bin',  type=str, help='path to the dev source file')
++    parser.add_argument('--dev_file', default='/Users/darby/Desktop/MIPT/master/torchASN/data/sparql/dev.bin',  type=str, help='path to the dev source file')
+ 
+     parser.add_argument('--enc_hid_size', default=128,  type=int, help='encoder hidden size')
+     parser.add_argument('--src_emb_size', default=128,  type=int, help='sentence embedding size')
+Index: scripts/turk/train.sh
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>#!/bin/bash\nset -e\n\nseed=${1:-0}\nasdl_file=\"data/turk/turk_asdl.txt\"\nvocab=\"data/turk/vocab.bin\"\ntrain_file=\"data/turk/train.bin\"\ndev_file=\"data/turk/dev.bin\"\ndropout=0.3\nenc_hid_size=100\nsrc_emb_size=100\nfield_emb_size=100\nmax_epoch=100\nclip_grad=5.0\nbatch_size=32\nlr=0.003\nmodel_file=model.turk.enc${enc_hidden_size}.src${src_emb_size}.field${field_emb_size}.drop${dropout}.max_ep${max_epoch}.batch${batch_size}.lr${lr}.clip_grad${clip_grad}.bin\n\n# echo \"**** Writing results to logs/regex/${model_name}.log ****\"\n# mkdir -p logs/regex\n# echo commit hash: `git rev-parse HEAD` > logs/regex/${model_name}.log\n\npython -u train.py \\\n    --asdl_file ${asdl_file} \\\n    --train_file ${train_file} \\\n    --dev_file ${dev_file} \\\n    --vocab ${vocab} \\\n    --enc_hid_size ${enc_hid_size} \\\n    --src_emb_size ${src_emb_size} \\\n    --field_emb_size ${field_emb_size} \\\n    --dropout ${dropout} \\\n    --max_epoch ${max_epoch} \\\n    --lr ${lr} \\\n    --batch_size ${batch_size} \\\n    --clip_grad ${clip_grad} \\\n    --log_every 50 \\\n    --max_decode_step 70 \\\n    --save_to checkpoints/turk/${model_file} 2>&1 | tee -a logs/${model_file}.log\n\n. scripts/turk/test.sh checkpoints/turk/${model_file} 2>&1 | tee -a logs/test.${model_file}.log\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/scripts/turk/train.sh b/scripts/turk/train.sh
+--- a/scripts/turk/train.sh	(revision 57ae0664a94c6c3167d8b3ee094df03104767fc9)
++++ b/scripts/turk/train.sh	(date 1671750278594)
+@@ -13,7 +13,7 @@
+ max_epoch=100
+ clip_grad=5.0
+ batch_size=32
+-lr=0.003
++lr=0.03
+ model_file=model.turk.enc${enc_hidden_size}.src${src_emb_size}.field${field_emb_size}.drop${dropout}.max_ep${max_epoch}.batch${batch_size}.lr${lr}.clip_grad${clip_grad}.bin
+ 
+ # echo "**** Writing results to logs/regex/${model_name}.log ****"

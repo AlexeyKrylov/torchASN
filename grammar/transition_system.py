@@ -119,7 +119,7 @@ class TransitionSystem(object):
         if isinstance(action_tree.action, ReduceAction):  # Reduce Action -> None
             return None
 
-        if not action_tree.fields:  # Case for constructor without parameters (agg_op = VOID | SUM)
+        if not action_tree.fields:  # Case for constructor without parameters (a.g. agg_op = VOID | SUM)
             return AbstractSyntaxTree(action_tree.action.choice)
 
         production = action_tree.action.choice
