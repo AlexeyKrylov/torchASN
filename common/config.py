@@ -9,13 +9,15 @@ def update_args(args, ex_args):
 
 def _add_test_args(parser):
     parser.add_argument('--test_file', default='data/sparql/test.bin', type=str, help='path to the test set file')
-    parser.add_argument('--model_file', default='checkpoints/ASN_01_02_2023_19_10_33/models/ASN_model_file.pt', type=str, help='path to the model file')
+    parser.add_argument('--model_file', default='checkpoints/ASN_06_02_2023_14_45_23/models/ASN_model_file.pt', type=str, help='path to the model file')
     parser.add_argument('--beam_size', default=100, type=int, help='decoder beam size')
     parser.add_argument('--max_decode_step', default=100, type=int, help='maximum decode step')
     parser.add_argument('--cuda', action='store_true', default=False, help='Use gpu')
     parser.add_argument('--train', action='store_true', default=False)
     parser.add_argument('--asdl_file', default='data/sparql/sparql_asdl.txt', type=str, help='Path to ASDL grammar specification')
     parser.add_argument('--batch_size', default=1487, type=int, help='batch size')
+    parser.add_argument('--dev_file', default='data/sparql/dev.bin',  type=str, help='path to the dev source file')
+
 
 
 
