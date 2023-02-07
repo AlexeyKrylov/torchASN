@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 
 def test(args):
-    test_set = Dataset.from_bin_file(args.test_file)
+    test_set = Dataset.from_bin_file(args.dev_file)
     parser = ASNParser.load(args.model_file, ex_args=args)
     grammar = Grammar.from_text(open(args.asdl_file).read())
     transition_system = SparqlTransitionSystem(grammar)
