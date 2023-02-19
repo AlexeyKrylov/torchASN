@@ -225,25 +225,24 @@ def build_ast_from_toks(grammar, token_subset, rule):
             comparison_production = grammar.get_prod_by_ctr_name(rule[0])
             comparison_op_node = AbstractSyntaxTree(comparison_production, None)
             comparison_op_field = RealizedField(comp_production["comparison_val"], comparison_op_node)
-            comp_children.append(comparison_op_field)
+            # В fields добавляю ниже для корректного учёта порядка, как в грамматике
 
-            # comparable_obj
+            # left_comp / right_comp
             fields = []
 
             if rule[0] != "NOTIN":
                 left_comp_tokens = field[2:field.index(rule[1])]
-                right_comp_tokens = field[field.index(rule[1])+1:-1]
+                right_comp_tokens = field[field.index(rule[1])+1:]
             else:
                 left_comp_tokens = token_subset[len("filter ( "):token_subset.find(" not in")].split()
                 right_comp_tokens = token_subset[token_subset.find("not in")+len("not in "):-1].split()
 
             for comp_tokens in [left_comp_tokens, right_comp_tokens]:
                 fields.append(build_ast_from_toks(grammar, comp_tokens, "STRING_FUNC"))
-            else:
-                fields.append(None)  # Reduce
 
-            comparable_obj = RealizedField(comp_production["comparable_obj"], fields)
-            comp_children.append(comparable_obj)
+            comp_children = [RealizedField(comp_production["left_comp"], fields[0]),
+                             comparison_op_field,
+                             RealizedField(comp_production["right_comp"], fields[1])]
 
             comp_ast = AbstractSyntaxTree(comp_production, comp_children)
 
@@ -288,7 +287,6 @@ def build_ast_from_toks(grammar, token_subset, rule):
         # ["SUBJ_1", "dr:locatedinclosest", "?dummy"]
         field = token_subset.strip().split(" ")
         subject, predicate, object_ = field
-
 
         children.extend([RealizedField(production["subject_val"], str(subject)),
                          RealizedField(production["predicate_val"], str(predicate)),
@@ -430,15 +428,15 @@ def build_sparql_expr_from_ast(sparql_ast):
             filter = where_val.fields[0].value
 
             if filter.production.constructor.name == "COMPARISON":
-                comparison_val = filter.fields[0].value.production.constructor.name
+                comparison_val = filter.fields[1].value.production.constructor.name
 
-                comparable_objects = filter.fields[1].value
+                left_comp, right_comp = filter.fields[0].value, filter.fields[2].value
 
                 comparison_val_token = {"EQUAL": "=", "NOTEQUAL": "!=", "MORE": ">",
                                         "LESS": "<", "IN": "in", "NOTIN": "not in"}[comparison_val]
 
-                left_comp = _string_func_processor(comparable_objects[0].fields[0].value)
-                right_comp = _string_func_processor(comparable_objects[1].fields[0].value)
+                left_comp = _string_func_processor(left_comp.fields[0].value)
+                right_comp = _string_func_processor(right_comp.fields[0].value)
 
                 tokens.extend(left_comp+[comparison_val_token]+right_comp)
 
@@ -461,9 +459,8 @@ def build_sparql_expr_from_ast(sparql_ast):
         order_fields = order.fields
         tokens.extend(["order", "by"])
 
-        if order_fields[0] is not None:
-            order_flag_token = order_fields[0].value.production.constructor.name.lower()
-            tokens.append(order_flag_token)
+        order_flag_token = order_fields[0].value.production.constructor.name.lower()
+        tokens.append(order_flag_token)
 
         tokens.extend(["(", order_fields[1].value, ")"])
 

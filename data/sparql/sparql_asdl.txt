@@ -14,7 +14,7 @@ as_exp = AS(col_name as_val)
 where_expr = WHERE(where_col* where_val)
 where_col = TRIPLET(subject subject_val, predicate predicate_val, object object_val)
           | FILTER(multi_filts filter)
-multi_filts = COMPARISON(comp_op comparison_val, str_expr* comparable_obj)
+multi_filts = COMPARISON(str_expr left_comp, comp_op comparison_val, str_expr right_comp)
             | STRINGS(strings_op strings_val)
 strings_op = CONTAINS(str_expr filter_string, string sub_search)
            | STRSTARTS(str_expr filter_string, string sub_search)
@@ -29,7 +29,7 @@ comp_op = EQUAL | NOTEQUAL | MORE | LESS | IN | NOTIN
 date_get = NOW | YEAR | MONTH | DAY | HOURS | MINUTES | SECONDS | TIMEZONE | TZ
 
 # ORDER BY
-order_expr = ORDERBY(order_flag? flag_val, column_id ord_column)
+order_expr = ORDERBY(order_flag flag_val, column_id ord_column)
 order_flag = DESC | ASC
 
 # LIMIT
