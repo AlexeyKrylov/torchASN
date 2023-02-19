@@ -459,8 +459,9 @@ def build_sparql_expr_from_ast(sparql_ast):
         order_fields = order.fields
         tokens.extend(["order", "by"])
 
-        order_flag_token = order_fields[0].value.production.constructor.name.lower()
-        tokens.append(order_flag_token)
+        if order_fields[0] is not None:
+            order_flag_token = order_fields[0].value.production.constructor.name.lower()
+            tokens.append(order_flag_token)
 
         tokens.extend(["(", order_fields[1].value, ")"])
 
