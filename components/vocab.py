@@ -133,6 +133,7 @@ class VocabEntry(object):
                     vocab_entry.add(word)
                 else:
                     words_not_included.append(word)
+
         print(vocab_entry.id_to_word)
         # print('word types not included: %s' % words_not_included)
 
