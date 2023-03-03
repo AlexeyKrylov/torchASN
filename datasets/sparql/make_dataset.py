@@ -1,25 +1,22 @@
 from os.path import join
-import sys
-
-sys.path.append('.')
-
 import pickle
 from components.dataset import Example
-
 from grammar.grammar import Grammar
 from grammar.sparql.sparql_transition_system import *
 from datasets.utils import build_dataset_vocab
-sys.path.append('.')
+from data.sparql_json.parse_json2txt import parse_json
 
 
-def load_dataset(split, transition_system):
+def load_dataset(split, transition_system, project_path):
     """
     @split: str - datasplit type, a.g.: train/test/val
     """
 
-    prefix = 'data/sparql/'
-    src_file = join(prefix, "src-{}.txt".format(split))  # Input text
-    spec_file = join(prefix, "spec-{}.txt".format(split))  # Desired code
+    prefix = project_path + '/data/sparql/'
+    src_file = join(prefix, "src-{}.txt".format(split.split('json')[1][1:-1])) # Input text
+    spec_file = join(prefix, "spec-{}.txt".format(split.split('json')[1][1:-1]))  # Desired code
+
+    parse_json(split, src_path=src_file, spec_path=spec_file)
 
     examples = []
 
@@ -65,21 +62,21 @@ def load_dataset(split, transition_system):
     return examples
 
 
-def make_dataset():
-    
-    grammar = Grammar.from_text(open('data/sparql/sparql_asdl.txt').read())
+def make_dataset(language='russian', project_path='C:/Users/krilo/PycharmProjects/torchASN'):
+    grammar = Grammar.from_text(open(project_path + '/data/sparql/sparql_asdl.txt').read())
     transition_system = SparqlTransitionSystem(grammar)
 
-    train_set = load_dataset("train", transition_system)
-    dev_set = load_dataset("val", transition_system)
-    test_set = load_dataset("test", transition_system)
+    train_set = load_dataset(project_path + "/data/sparql_json/" + language + "_train_split.json", transition_system, project_path)
+    dev_set = load_dataset(project_path + "/data/sparql_json/" + language + "_dev_split.json", transition_system, project_path)
+    test_set = load_dataset(project_path + "/data/sparql_json/" + language + "_test_split.json", transition_system, project_path)
+
     # get vocab from actions
     vocab = build_dataset_vocab(train_set, transition_system, src_cutoff=2)
     # cache decision using vocab can be done in train
-    pickle.dump(train_set, open('data/sparql/train.bin', 'wb'))
-    pickle.dump(dev_set, open('data/sparql/dev.bin', 'wb'))
-    pickle.dump(test_set, open('data/sparql/test.bin', 'wb'))
-    pickle.dump(vocab, open('data/sparql/vocab.bin', 'wb'))
+    pickle.dump(train_set, open(project_path + '/data/sparql/train.bin', 'wb'))
+    pickle.dump(dev_set, open(project_path + '/data/sparql/dev.bin', 'wb'))
+    pickle.dump(test_set, open(project_path + '/data/sparql/test.bin', 'wb'))
+    pickle.dump(vocab, open(project_path + '/data/sparql/vocab.bin', 'wb'))
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from common.config import *
 from components.dataset import *
 
 from grammar.grammar import Grammar
-
+from datasets.sparql.make_dataset import make_dataset
 from grammar.sparql.sparql_transition_system import SparqlTransitionSystem
 from models.ASN import ASNParser
 import time
@@ -10,9 +10,10 @@ from tqdm import tqdm
 
 
 def test(args):
-    test_set = Dataset.from_bin_file(args.dev_file)
-    parser = ASNParser.load(args.model_file, ex_args=args)
-    grammar = Grammar.from_text(open(args.asdl_file).read())
+    make_dataset(args.language, args.project_path)
+    test_set = Dataset.from_bin_file(args.project_path+args.test_file)
+    parser = ASNParser.load(args.project_path+args.model_file, ex_args=args)
+    grammar = Grammar.from_text(open(args.project_path+args.asdl_file).read())
     transition_system = SparqlTransitionSystem(grammar)
 
     if args.cuda:
@@ -40,9 +41,9 @@ def test(args):
 
     print('eval acc {:.3f}, eval time {:.0f}'.format(match_acc, time.time() - eval_begin))
 
-    # with open('/'.join(args.model_file.split('/')[:-2]) + "/output.txt", "w") as f:
-    #     for c in to_print:
-    #         f.write(c + "\n")
+    with open('/'.join((args.project_path+args.model_file).split('/')[:-2]) + "/output.txt", "w") as f:
+        for c in to_print:
+            f.write(c + "\n")
 
 
 if __name__ == '__main__':

@@ -11,6 +11,7 @@ from torch import optim
 from tqdm import tqdm
 import time
 import os
+from datasets.sparql.make_dataset import make_dataset
 
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
@@ -18,6 +19,7 @@ def get_lr(optimizer):
     return
 
 def train(args):
+    make_dataset(args.language, args.project_path)
     path_save_to = args.save_to + "ASN_" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
     os.mkdir(path_save_to)
     os.mkdir(path_save_to + '/models')
