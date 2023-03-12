@@ -93,7 +93,7 @@ class ASNParser(nn.Module):
 
         # encoder
         self.args = args
-        self.src_embedding = EmbeddingLayer(args.src_emb_size, vocab.src_vocab.size(), args.dropout, train=self.args.train)
+        self.src_embedding = EmbeddingLayer(args.src_emb_size, vocab.src_vocab.size(), args.dropout, train=self.args.train, bert_name=self.args.bert_name)
         self.encoder = RNNEncoder(args.src_emb_size, args.enc_hid_size, args.dropout, True)
         self.transition_system = transition_system
         self.vocab = vocab
@@ -126,7 +126,7 @@ class ASNParser(nn.Module):
         self.dropout = nn.Dropout(args.dropout)
 
     def score(self, examples):
-        batch = Batch(examples, self.grammar, self.vocab, cuda=self.args.cuda)
+        batch = Batch(examples, self.grammar, self.vocab, cuda=self.args.cuda, bert_name=self.args.bert_name)
 
         return torch.stack(self._score(batch))
 
@@ -371,14 +371,15 @@ class ASNParser(nn.Module):
 
 
 class EmbeddingLayer(nn.Module):
-    def __init__(self, embedding_dim, full_dict_size, embedding_dropout_rate, train=False):
+    def __init__(self, embedding_dim, full_dict_size, embedding_dropout_rate, train=False, bert_name="cointegrated/rubert-tiny"):
         super(EmbeddingLayer, self).__init__()
-        self.model = AutoModel.from_pretrained("cointegrated/rubert-tiny")
+        self.model = AutoModel.from_pretrained(bert_name)
+
 
         for param in self.model.parameters():
             param.requires_grad = train
 
-        self.linear = nn.Linear(312, embedding_dim)
+        self.linear = nn.Linear(self.model.encoder.layer[0].output.dense.out_features, embedding_dim)
         self.bn = nn.BatchNorm1d(embedding_dim)
         self.dropout = nn.Dropout(embedding_dropout_rate)
 

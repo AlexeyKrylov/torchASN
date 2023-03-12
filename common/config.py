@@ -9,7 +9,7 @@ def update_args(args, ex_args):
 
 def _add_test_args(parser):
     parser.add_argument('--test_file', default='/data/sparql/test.bin', type=str, help='path to the test set file')
-    parser.add_argument('--model_file', default='/checkpoints/ASN_03_03_2023_14_41_57/models/ASN_model_file.pt', type=str, help='path to the model file')
+    parser.add_argument('--model_file', default='/checkpoints/ASN_12_03_2023_18_19_58/models/ASN_model_file.pt', type=str, help='path to the model file')
     parser.add_argument('--beam_size', default=100, type=int, help='decoder beam size')
     parser.add_argument('--max_decode_step', default=100, type=int, help='maximum decode step')
     parser.add_argument('--cuda', action='store_true', default=False, help='Use gpu')
@@ -19,12 +19,14 @@ def _add_test_args(parser):
     parser.add_argument('--dev_file', default='/data/sparql/dev.bin',  type=str, help='path to the dev source file')
     parser.add_argument('--language', type=str, default='russian', help='language: {english/russian}')
     parser.add_argument('--project_path', type=str, default='C:/Users/krilo/PycharmProjects/torchASN', help='Project path')
+    parser.add_argument('--bert_name', type=str, default='DeepPavlov/rubert-base-cased', help='Name of the bert')
 
 
 
 
 def _add_train_args(parser):
     parser.add_argument('--train', action='store_true', default=True)
+    parser.add_argument('--bert_name', type=str, default='DeepPavlov/rubert-base-cased', help='Name of the bert: DeepPavlov/rubert-base-cased # cointegrated/rubert-tiny')
     parser.add_argument('--language', type=str, default='russian', help='language: {english/russian}')
     parser.add_argument('--project_path', type=str, default='C:/Users/krilo/PycharmProjects/torchASN', help='Project path')
     parser.add_argument('--make_log', action='store_true', default=True, help='make tensorboard log')
