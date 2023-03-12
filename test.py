@@ -26,7 +26,7 @@ def test(args):
         eval_begin = time.time()
         parser.eval()
         with torch.no_grad():
-            batch = Batch(dev_set_, parser.grammar, parser.vocab, train=False, cuda=parser.args.cuda)
+            batch = Batch(dev_set_, parser.grammar, parser.vocab, train=False, cuda=parser.args.cuda, bert_name=parser.args.bert_name)
             parse_results = list(zip(parser.naive_parse(batch), [dev_set_[ex].tgt_ast for ex in range(len(batch))]))
 
             to_print.extend([transition_system.ast_to_surface_code(x[0]) for x in parse_results])

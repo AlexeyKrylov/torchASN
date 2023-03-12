@@ -59,14 +59,8 @@ class Example:
         self.meta = meta
 
 
-
-def sent_lens_to_mask(lens, max_length):
-    mask = [[1 if j < l else 0 for j in range(max_length)] for l in lens]
-    # match device of input
-    return mask
-
 class Batch(object):
-    def __init__(self, examples, grammar, vocab, train=True, cuda=False):
+    def __init__(self, examples, grammar, vocab, train=True, cuda=False, bert_name="cointegrated/rubert-tiny"):
         self.examples = examples
 
         # self.src_sents = [e.src_sent for e in self.examples]
@@ -76,19 +70,19 @@ class Batch(object):
         self.vocab = vocab
         self.cuda = cuda
         self.train = train
+        self.bert_name = bert_name
         self.build_input()
 
     def __len__(self):
         return len(self.examples)
 
     def build_input(self):
-        tokenizer = AutoTokenizer.from_pretrained("cointegrated/rubert-tiny")
+        tokenizer = AutoTokenizer.from_pretrained(self.bert_name)
         max_sent_len = max([len(x.src_toks.split()) for x in self.examples])
         self.sents = tokenizer([x.src_toks for x in self.examples], padding=True, truncation=True, max_length=max_sent_len, return_tensors='pt')
         # print(self.sents)
-        self.sent_lens = torch.LongTensor([ex.tolist().index(3)+1 for ex in self.sents['input_ids']])
-        max_sent_len = max(self.sent_lens)
-        self.sent_masks = sent_lens_to_mask(self.sent_lens, max_sent_len)
+        self.sent_lens = torch.LongTensor([sum(ex) for ex in self.sents['attention_mask']])
+        self.sent_masks = self.sents['attention_mask'].tolist()
         # print(self.sent_lens)
         self.sent_masks = torch.ByteTensor(self.sent_masks)
 

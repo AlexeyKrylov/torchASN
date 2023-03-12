@@ -86,6 +86,7 @@ def train(args):
 
 
 
+
         print('[epoch {}] train loss {:.3f}, epoch time {:.0f}, total time {:.0f}, lr {:.5f}'.format(epoch, epoch_loss / len(train_set), time.time() - epoch_begin, time.time() - train_begin, get_lr(optimizer)))
 
         to_print = list()
