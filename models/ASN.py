@@ -126,17 +126,16 @@ class ASNParser(nn.Module):
         self.dropout = nn.Dropout(args.dropout)
 
     def score(self, examples):
-        batch = Batch(examples, self.grammar, self.vocab, cuda=self.args.cuda, bert_name=self.args.bert_name)
+        scores = [self._score(ex) for ex in examples]
 
-        return torch.stack(self._score(batch))
+        return torch.stack(scores)
 
-    def _score(self, batch):
+    def _score(self, ex):
+        batch = Batch([ex], self.grammar, self.vocab)
 
         context_vecs, encoder_outputs = self.encode(batch)
-        # print(context_vecs.shape, encoder_outputs[0].shape, encoder_outputs[1].shape)
         init_state = encoder_outputs
-        # print(init_state[0][0, :].shape, init_state[1][0, :].shape, context_vecs[:, 0, :].shape)
-        return [self._score_node(self.grammar.root_type, (init_state[0][ex, :].unsqueeze(0), init_state[1][ex, :].unsqueeze(0)), batch[ex].tgt_actions, context_vecs[:, ex, :].unsqueeze(1), batch.sent_masks[ex], "single") for ex in range(len(batch))]
+        return self._score_node(self.grammar.root_type, init_state, ex.tgt_actions, context_vecs, batch.sent_masks, "single")
 
     def encode(self, batch):
         sent_lens = batch.sent_lens
@@ -373,13 +372,13 @@ class ASNParser(nn.Module):
 class EmbeddingLayer(nn.Module):
     def __init__(self, embedding_dim, full_dict_size, embedding_dropout_rate, train=False, bert_name="cointegrated/rubert-tiny"):
         super(EmbeddingLayer, self).__init__()
-        self.model = AutoModel.from_pretrained(bert_name)
-
+        # self.model = AutoModel.from_pretrained(bert_name)
+        self.model = nn.Embedding(full_dict_size, embedding_dim)
 
         for param in self.model.parameters():
             param.requires_grad = train
 
-        self.linear = nn.Linear(self.model.encoder.layer[0].output.dense.out_features, embedding_dim)
+        self.linear = nn.Linear(embedding_dim, embedding_dim)
         self.bn = nn.BatchNorm1d(embedding_dim)
         self.dropout = nn.Dropout(embedding_dropout_rate)
 
@@ -387,8 +386,8 @@ class EmbeddingLayer(nn.Module):
 
     def forward(self, input):
         # print(input)
-        model_output = self.model(**input)
-        embeddings = model_output.last_hidden_state
+        embeddings = self.model(input)
+        # embeddings = model_output.last_hidden_state
         embeddings = F.gelu(embeddings)
         embeddings = self.linear(embeddings)
         embeddings = self.bn(embeddings.permute(0, 2, 1)).permute(0, 2, 1)

@@ -1,8 +1,11 @@
 from common.config import *
 from components.dataset import *
+from common.utils import calculate_batch_metrics
+
+
 
 from grammar.grammar import Grammar
-from torch.utils.tensorboard import SummaryWriter
+import common.utils as utils
 from grammar.sparql.sparql_transition_system import SparqlTransitionSystem
 from models.ASN import ASNParser
 from models import nn_utils
@@ -14,6 +17,7 @@ import os
 from datasets.sparql.make_dataset import make_dataset
 
 def get_lr(optimizer):
+    # TODO: Remove default lr_schaduler has .get_lr() method
     for param_group in optimizer.param_groups:
         return param_group["lr"]
     return
@@ -26,11 +30,7 @@ def train(args):
     os.mkdir(path_save_to + '/logs')
 
     if args.make_log:
-        train_writer = SummaryWriter(path_save_to + '/logs/train')
-        valid_writer = SummaryWriter(path_save_to + '/logs/valid')
-        for k in args.__dict__.keys():
-            train_writer.add_text(str(k), str(getattr(args, k)))
-
+        logger = utils.TXTLogger(work_dir=path_save_to + "/logs")
 
     train_set = Dataset.from_bin_file(args.train_file)
     if args.dev_file:
@@ -54,13 +54,12 @@ def train(args):
     # optimizer = optim.Adam(parser.parameters(), lr=args.lr)
     lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.sch_step_size, gamma=args.gamma)
     best_acc = 0
-    log_every = args.log_every
     
     train_begin = time.time()
     for epoch in range(1, args.max_epoch + 1):
         train_iter = 0
-        loss_val = 0.
-        epoch_loss = 0.
+        val_loss = 0.
+        train_loss = 0.
 
         parser.train()
 
@@ -68,8 +67,7 @@ def train(args):
         for batch_example in train_set.batch_iter(batch_size=args.batch_size, shuffle=True):
             optimizer.zero_grad()
             loss = parser.score(batch_example)
-            loss_val += torch.sum(loss).data.item()
-            epoch_loss += torch.sum(loss).data.item()
+            train_loss += torch.sum(loss).data.item()
             loss = torch.mean(loss)
 
             loss.backward()
@@ -78,48 +76,63 @@ def train(args):
             optimizer.step()
             lr_scheduler.step()
             train_iter += 1
-            if train_iter % log_every == 0:
-                print("[epoch {}, step {}] loss: {:.3f}".format(epoch, train_iter, loss_val / (log_every * args.batch_size)))
-                loss_val = 0.
-                if args.make_log:
-                    train_writer.add_scalar('Loss', loss, epoch)
 
+        print('[epoch {}] train loss {:.3f}, epoch time {:.0f}, total time {:.0f}, lr {:.5f}'.format(epoch, train_loss / len(train_set), time.time() - epoch_begin, time.time() - train_begin, get_lr(optimizer)))
 
+        target_data: list = []
+        eval_result: list = []
+        input_data: list = []
 
-
-        print('[epoch {}] train loss {:.3f}, epoch time {:.0f}, total time {:.0f}, lr {:.5f}'.format(epoch, epoch_loss / len(train_set), time.time() - epoch_begin, time.time() - train_begin, get_lr(optimizer)))
-
-        to_print = list()
-        to_print_target = list()
-
+        val_exm_epoch_acc = 0
+        val_gm_epoch_acc = 0
         if epoch > args.run_val_after:
+
             for dev_set_ in tqdm(dev_set.batch_iter(batch_size=args.batch_size, shuffle=False)):
-                eval_begin = time.time()
                 parser.eval()
+
                 with torch.no_grad():
                     batch = Batch(dev_set_, parser.grammar, parser.vocab, train=False, cuda=parser.args.cuda)
                     parse_results = list(zip(parser.naive_parse(batch), [dev_set_[ex].tgt_ast for ex in range(len(batch))]))
 
-                    to_print.extend([transition_system.ast_to_surface_code(x[0]) for x in parse_results])
-                    to_print_target.extend([transition_system.ast_to_surface_code(x[1]) for x in parse_results])
+                    loss = parser.score(dev_set_)
+                    val_loss += torch.sum(loss).data.item()
 
-            # print(to_print)
-            # print("-"*10)
-            # print(to_print_target)
+                    input_data.extend([x.src_toks for x in dev_set_])
+                    target_data.extend([transition_system.ast_to_surface_code(x[1]) for x in parse_results])
+                    eval_result.extend([transition_system.ast_to_surface_code(x[0]) for x in parse_results])
 
-            match_results = [x == y for x, y in zip(to_print, to_print_target)]
-            match_acc = sum(match_results) * 1. / len(match_results)
+                    val_metrics = calculate_batch_metrics(eval_result, target_data)
+                    val_exm_epoch_acc += val_metrics['exact_match']
+                    val_gm_epoch_acc += val_metrics['graph_match']
 
-            print('[epoch {}] eval acc {:.3f}, eval time {:.0f}'.format(epoch, match_acc, time.time() - eval_begin))
+                val_exm_epoch_acc /= len(dev_set)
+                val_gm_epoch_acc /= len(dev_set)
+                val_loss /= len(dev_set)
+                train_loss /= len(train_set)
+
             if args.make_log:
-                valid_writer.add_scalar('Accuracy', match_acc, epoch)
+                logger.log({"epoch": epoch,
+                            "train_loss": train_loss,
+                            "val_loss": val_loss,
+                            "val_exact_match": val_exm_epoch_acc,
+                            "val_graph_match": val_gm_epoch_acc,
+                            "learning_rate": lr_scheduler.get_lr()})
 
-            if match_acc >= best_acc:
-                best_acc = match_acc
+                logger.log('********** Translation example **********')
+                for input_question, true_sparql, pred_sparql in zip(input_data[:5],
+                                                                    target_data[:5],
+                                                                    eval_result[:5]):
+                    logger.log(f"NL: {input_question}")
+                    logger.log(f"AQ: {true_sparql}")
+                    logger.log(f"PQ: {pred_sparql}")
+                    logger.log(" ")
+                logger.log('******************************')
+
+            if val_exm_epoch_acc >= best_acc:
+                best_acc = val_exm_epoch_acc
                 parser.save(path_save_to+"/models/ASN_model_file.pt")
 
             print(f"BEST ACCURACY = {best_acc}")
-
 
 if __name__ == '__main__':
     args = parse_args('train')
