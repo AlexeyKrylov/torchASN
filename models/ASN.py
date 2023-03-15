@@ -130,7 +130,7 @@ class ASNParser(nn.Module):
 
          return torch.stack(self._score(batch))
 
-     def _score(self, batch):
+    def _score(self, batch):
 
          context_vecs, encoder_outputs = self.encode(batch)
          # print(context_vecs.shape, encoder_outputs[0].shape, encoder_outputs[1].shape)

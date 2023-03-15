@@ -357,7 +357,7 @@ def build_sparql_expr_from_ast(sparql_ast):
 
             return [date_val.lower(), "(", date_of_column, ")"]
 
-        elif string_ast.production.constructor.name == "COLUMN":
+        elif string_ast.production.constructor.name in ["COLUMN", "STRING"]:
             column_id = string_ast.fields[0].value
 
             return [column_id]

@@ -1,7 +1,7 @@
 from common.config import *
 from components.dataset import *
 from common.utils import calculate_batch_metrics
-
+import common.lr_scheduler
 
 
 from grammar.grammar import Grammar
@@ -23,7 +23,7 @@ def get_lr(optimizer):
     return
 
 def train(args):
-    make_dataset(args.language, args.project_path)
+    # make_dataset(args.language, args.project_path)
     path_save_to = args.save_to + "ASN_" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
     os.mkdir(path_save_to)
     os.mkdir(path_save_to + '/models')
@@ -48,11 +48,25 @@ def train(args):
     if args.cuda:
         parser = parser.cuda()
 
-    nn_utils.glorot_init(parser.parameters())
+    # Костыль в студию
+    encoder_params_size = len([*parser.src_embedding.model.parameters()])
+    nn_utils.glorot_init(parser.parameters(), encoder_params_size)
 
-    optimizer = optim.AdamW(parser.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = optim.AdamW([{"params": iter([*parser.parameters()][encoder_params_size:])},
+                             {"params": parser.src_embedding.model.parameters(), "lr": args.bert_finetune_rate}], lr=args.lr)
     # optimizer = optim.Adam(parser.parameters(), lr=args.lr)
-    lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.sch_step_size, gamma=args.gamma)
+
+    lr_scheduler = common.lr_scheduler.InverseSquareRootScheduler(optimizer=optimizer,
+                                                           warmup_init_lrs=[
+                                                               args.bert_warmup_init_finetuning_learning_rate,
+                                                               args.warm_up_init_learning_rate],
+                                                           num_warmup_steps=[
+                                                               args.num_warmup_steps,
+                                                               args.num_warmup_steps],
+                                                           num_steps=int(
+                                                               len(train_set) // args.batch_size
+                                                                              * args.max_epoch))
+    # lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.sch_step_size, gamma=args.gamma)
     best_acc = 0
     
     train_begin = time.time()
@@ -105,10 +119,10 @@ def train(args):
                     val_exm_epoch_acc += val_metrics['exact_match']
                     val_gm_epoch_acc += val_metrics['graph_match']
 
-                val_exm_epoch_acc /= len(dev_set)
-                val_gm_epoch_acc /= len(dev_set)
-                val_loss /= len(dev_set)
-                train_loss /= len(train_set)
+            val_exm_epoch_acc /= len(dev_set)
+            val_gm_epoch_acc /= len(dev_set)
+            val_loss /= len(dev_set)
+            train_loss /= len(train_set)
 
             if args.make_log:
                 logger.log({"epoch": epoch,
