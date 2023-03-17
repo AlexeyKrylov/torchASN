@@ -126,17 +126,17 @@ class ASNParser(nn.Module):
         self.dropout = nn.Dropout(args.dropout)
 
     def score(self, examples):
-        batch = Batch(examples, self.grammar, self.vocab, cuda=self.args.cuda, bert_name=self.args.bert_name)
+         batch = Batch(examples, self.grammar, self.vocab, cuda=self.args.cuda, bert_name=self.args.bert_name)
 
-        return torch.stack(self._score(batch))
+         return torch.stack(self._score(batch))
 
     def _score(self, batch):
 
-        context_vecs, encoder_outputs = self.encode(batch)
-        # print(context_vecs.shape, encoder_outputs[0].shape, encoder_outputs[1].shape)
-        init_state = encoder_outputs
-        # print(init_state[0][0, :].shape, init_state[1][0, :].shape, context_vecs[:, 0, :].shape)
-        return [self._score_node(self.grammar.root_type, (init_state[0][ex, :].unsqueeze(0), init_state[1][ex, :].unsqueeze(0)), batch[ex].tgt_actions, context_vecs[:, ex, :].unsqueeze(1), batch.sent_masks[ex], "single") for ex in range(len(batch))]
+         context_vecs, encoder_outputs = self.encode(batch)
+         # print(context_vecs.shape, encoder_outputs[0].shape, encoder_outputs[1].shape)
+         init_state = encoder_outputs
+         # print(init_state[0][0, :].shape, init_state[1][0, :].shape, context_vecs[:, 0, :].shape)
+         return [self._score_node(self.grammar.root_type, (init_state[0][ex, :].unsqueeze(0), init_state[1][ex, :].unsqueeze(0)), batch[ex].tgt_actions, context_vecs[:, ex, :].unsqueeze(1), batch.sent_masks[ex], "single") for ex in range(len(batch))]
 
     def encode(self, batch):
         sent_lens = batch.sent_lens
@@ -374,7 +374,6 @@ class EmbeddingLayer(nn.Module):
     def __init__(self, embedding_dim, full_dict_size, embedding_dropout_rate, train=False, bert_name="cointegrated/rubert-tiny"):
         super(EmbeddingLayer, self).__init__()
         self.model = AutoModel.from_pretrained(bert_name)
-
 
         for param in self.model.parameters():
             param.requires_grad = train
