@@ -398,12 +398,6 @@ class LuongAttention(nn.Module):
         self.context_size = hidden_size # if context_size is None else context_size CHANGED
         self.attn = torch.nn.Linear(self.context_size, self.hidden_size)
 
-        self.init_weight()
-
-    def init_weight(self):
-        nn.init.xavier_uniform_(self.attn.weight, gain=1)
-        nn.init.constant_(self.attn.bias, 0)
-
     # input query: batch * q * hidden, contexts: c * batch * hidden
     # output: batch * len * q * c
     def forward(self, query, context, inf_mask=None, requires_weight=False):
