@@ -148,26 +148,6 @@ def log_sum_exp(inputs, dim=None, keepdim=False):
     return outputs
 
 
-def uniform_init(lower, upper, params):
-    for p in params:
-        p.data.uniform_(lower, upper)
-
-
-def glorot_init(params, encoder_params_size):
-
-    for p in params:
-        if encoder_params_size != 0:
-            encoder_params_size -= 1
-            continueg
-        else:
-            if len(p.data.size()) > 1:
-                init.xavier_normal_(p.data)
-
-
-def identity(x):
-    return x
-
-
 class LabelSmoothing(nn.Module):
     """Implement label smoothing.
 

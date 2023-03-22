@@ -62,7 +62,7 @@ def load_dataset(split, transition_system, project_path):
     return examples
 
 
-def make_dataset(language='russian', project_path='C:/Users/krilo/PycharmProjects/torchASN'):
+def make_dataset(language='russian', project_path='/torchASN'):
     grammar = Grammar.from_text(open(project_path + '/data/sparql/sparql_asdl.txt').read())
     transition_system = SparqlTransitionSystem(grammar)
 

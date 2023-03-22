@@ -3,7 +3,6 @@ from components.dataset import *
 from common.utils import calculate_batch_metrics
 import common.lr_scheduler
 
-
 from grammar.grammar import Grammar
 import common.utils as utils
 from grammar.sparql.sparql_transition_system import SparqlTransitionSystem
@@ -16,14 +15,8 @@ import time
 import os
 from datasets.sparql.make_dataset import make_dataset
 
-def get_lr(optimizer):
-    # TODO: Remove default lr_schaduler has .get_lr() method
-    for param_group in optimizer.param_groups:
-        return param_group["lr"]
-    return
-
 def train(args):
-    # make_dataset(args.language, args.project_path)
+    make_dataset(args.language, args.project_path)
     path_save_to = args.save_to + "ASN_" + datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
     os.mkdir(path_save_to)
     os.mkdir(path_save_to + '/models')
@@ -48,25 +41,35 @@ def train(args):
     if args.cuda:
         parser = parser.cuda()
 
-    # Костыль в студию
-    encoder_params_size = len([*parser.src_embedding.model.parameters()])
-    nn_utils.glorot_init(parser.parameters(), encoder_params_size)
-
-    optimizer = optim.AdamW([{"params": iter([*parser.parameters()][encoder_params_size:])},
-                             {"params": parser.src_embedding.model.parameters(), "lr": args.bert_finetune_rate}], lr=args.lr)
-    # optimizer = optim.Adam(parser.parameters(), lr=args.lr)
+    optimizer = optim.AdamW([{"params": parser.encoder.parameters(), "lr": args.bert_finetune_rate},
+                             {"params": parser.comp_type_dict.parameters()},
+                             {"params": parser.const_type_dict.parameters()},
+                             {"params": parser.prim_type_dict.parameters()},
+                             {"params": parser.reduce_module.parameters()},
+                             {"params": parser.v_lstm.parameters()},
+                             {"params": parser.attn.parameters()}], lr=args.lr)
 
     lr_scheduler = common.lr_scheduler.InverseSquareRootScheduler(optimizer=optimizer,
                                                            warmup_init_lrs=[
                                                                args.bert_warmup_init_finetuning_learning_rate,
+                                                               args.warm_up_init_learning_rate,
+                                                               args.warm_up_init_learning_rate,
+                                                               args.warm_up_init_learning_rate,
+                                                               args.warm_up_init_learning_rate,
+                                                               args.warm_up_init_learning_rate,
                                                                args.warm_up_init_learning_rate],
                                                            num_warmup_steps=[
+                                                               args.num_warmup_steps,
+                                                               args.num_warmup_steps,
+                                                               args.num_warmup_steps,
+                                                               args.num_warmup_steps,
+                                                               args.num_warmup_steps,
                                                                args.num_warmup_steps,
                                                                args.num_warmup_steps],
                                                            num_steps=int(
                                                                len(train_set) // args.batch_size
                                                                               * args.max_epoch))
-    # lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.sch_step_size, gamma=args.gamma)
+
     best_acc = 0
     
     train_begin = time.time()
@@ -90,8 +93,6 @@ def train(args):
             optimizer.step()
             lr_scheduler.step()
             train_iter += 1
-
-        print('[epoch {}] train loss {:.3f}, epoch time {:.0f}, total time {:.0f}, lr {:.5f}'.format(epoch, train_loss / len(train_set), time.time() - epoch_begin, time.time() - train_begin, get_lr(optimizer)))
 
         target_data: list = []
         eval_result: list = []
