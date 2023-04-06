@@ -10,6 +10,7 @@ def exact_match(pred_sparql, true_sparql):
     if pred_sparql == true_sparql:
         exact_match_status = 1
     return exact_match_status
+
 def calculate_batch_metrics(pred_sparql_list, true_sparql_list):
     func_dict = {'exact_match': exact_match,
                  'graph_match': graph_match}
@@ -29,6 +30,7 @@ def graph_match(pred_sparql, true_sparql):
     graph1 = Graph(true_triplet)
     graph2 = Graph(pred_triplet)
     return graph1.get_metric(graph2)
+
 def get_triplet_from_sparql(sparql_query):
     triplet = re.findall(r"{(.*?)}", sparql_query)
     if triplet:

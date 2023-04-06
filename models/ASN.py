@@ -47,8 +47,8 @@ class ConstructorTypeModule(nn.Module):
     def __init__(self,  args, production):
         super().__init__()
         self.production = production
-        self.n_field = len(production.constructor.fields)
-        self.field_embeddings = nn.Embedding(len(production.constructor.fields), args.field_emb_size)
+        self.n_field = len(production.constructor.fields)+1
+        self.field_embeddings = nn.Embedding(self.n_field, args.field_emb_size)
         self.w = nn.Linear(args.enc_hid_size + args.field_emb_size, args.enc_hid_size)
         self.dropout = nn.Dropout(args.dropout)
     
@@ -186,10 +186,10 @@ class ASNParser(nn.Module):
 
             cnstr_results = cnstr_module.update(self.v_lstm, v_state, contexts)
 
-            for next_field, next_state, next_action in zip(cnstr.fields, cnstr_results, action_node.fields):
+            for next_field, next_state, next_action in zip(cnstr.fields, cnstr_results[:-1], action_node.fields):
                 self.recursion_v_state = next_state
                 score += self._score_node(next_field.type, next_state, next_action, context_vecs, context_masks, next_field.cardinality)
-
+            self.recursion_v_state = cnstr_results[-1]
             return score
 
     def naive_parse(self, batch):
@@ -262,12 +262,12 @@ class ASNParser(nn.Module):
                 cnstr_results = cnstr_module.update(self.v_lstm, v_state, contexts)
 
                 action_fields = []
-                for next_field, next_state in zip(cnstr.fields, cnstr_results):
+                for next_field, next_state in zip(cnstr.fields, cnstr_results[:-1]):
                     self.recursion_v_state = next_state
                     action_fields.append(self._naive_parse(next_field.type, next_state,
                                                            context_vecs, context_masks, depth + 1,
                                                            next_field.cardinality))
-
+                self.recursion_v_state = cnstr_results[-1]
                 return ActionTree(action, action_fields)
 
     def parse(self, batch):  # Is not using
