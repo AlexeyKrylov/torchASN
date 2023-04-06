@@ -73,7 +73,7 @@ def train(args):
     best_acc = 0
     
     train_begin = time.time()
-    for epoch in range(1, args.max_epoch + 1):
+    for epoch in tqdm(range(1, args.max_epoch + 1)):
         train_iter = 0
         val_loss = 0.
         train_loss = 0.
@@ -94,15 +94,14 @@ def train(args):
             lr_scheduler.step()
             train_iter += 1
 
+
         target_data: list = []
         eval_result: list = []
         input_data: list = []
 
-        val_exm_epoch_acc = 0
-        val_gm_epoch_acc = 0
         if epoch > args.run_val_after:
 
-            for dev_set_ in tqdm(dev_set.batch_iter(batch_size=args.batch_size, shuffle=False)):
+            for dev_set_ in dev_set.batch_iter(batch_size=args.batch_size, shuffle=False):
                 parser.eval()
 
                 with torch.no_grad():
@@ -116,12 +115,12 @@ def train(args):
                     target_data.extend([transition_system.ast_to_surface_code(x[1]) for x in parse_results])
                     eval_result.extend([transition_system.ast_to_surface_code(x[0]) for x in parse_results])
 
-                    val_metrics = calculate_batch_metrics(eval_result, target_data)
-                    val_exm_epoch_acc += val_metrics['exact_match']
-                    val_gm_epoch_acc += val_metrics['graph_match']
+            val_metrics = calculate_batch_metrics(eval_result, target_data)
+            val_exm_epoch_acc = val_metrics['exact_match']
+            val_gm_epoch_acc = val_metrics['graph_match']
 
-            val_exm_epoch_acc /= len(dev_set)
-            val_gm_epoch_acc /= len(dev_set)
+            print("exact_match = ", val_exm_epoch_acc)
+            print("graph_match = ", val_gm_epoch_acc)
             val_loss /= len(dev_set)
             train_loss /= len(train_set)
 
